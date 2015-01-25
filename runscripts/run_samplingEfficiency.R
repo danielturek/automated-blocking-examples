@@ -1,7 +1,7 @@
 library(nimble)
 library(coda)
 source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
-kValues <- 0:3
+kValues <- 0:2
 Nvalues <- c(2, 4, 8)
 niter <- 2e+05
 keepInd <- (niter/2 + 1):niter

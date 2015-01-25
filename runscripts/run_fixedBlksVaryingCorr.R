@@ -1,6 +1,6 @@
 library(nimble)
 source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
-Nvalues <- c(20, 50, 100)
+Nvalues <- c(20, 50)
 niter <- 2e+05
 control <- list(niter = niter)
 runList <- list("all", "auto")
@@ -21,8 +21,8 @@ for (N in Nvalues) {
 }
 dfFixedBlksVaryingCorr <- createDFfromABlist(abList, niter)
 dfFixedBlksVaryingCorr$N <- as.numeric(gsub(".*N(.+)", "\\1", dfFixedBlksVaryingCorr$model))
-dffixedBlksVaryingCorr$model <- gsub("fixedBlksVaryingCorr", "", dffixedBlksVaryingCorr$model)
-dffixedBlksVaryingCorr$model <- gsub("N([23456789]0)$", "N0\\1", dffixedBlksVaryingCorr$model)
+dfFixedBlksVaryingCorr$model <- gsub("fixedBlksVaryingCorr", "", dfFixedBlksVaryingCorr$model)
+dfFixedBlksVaryingCorr$model <- gsub("N([23456789]0)$", "N0\\1", dfFixedBlksVaryingCorr$model)
 dfFixedBlksVaryingCorr_summary <- printMinTimeABS(dfFixedBlksVaryingCorr, round = FALSE)
 save(dfFixedBlksVaryingCorr, dfFixedBlksVaryingCorr_summary, file = "~/GitHub/automated-blocking-examples/results/results_fixedBlksVaryingCorr.RData")
 

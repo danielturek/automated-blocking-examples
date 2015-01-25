@@ -1,6 +1,6 @@
 library(nimble)
 source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
-k <- 6
+k <- 4
 N <- 2^k
 rhoVector <- c(0.2, 0.5, 0.8)
 niter <- 2e+05
