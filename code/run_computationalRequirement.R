@@ -1,9 +1,9 @@
 library(nimble)
-source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
+source("autoBlock_utils.R")
 niter <- 50000
 keepInd <- (niter/2 + 1):niter
 dfcomputationalRequirement <- data.frame()
-Nvalues <- c(2, 3, 5)
+Nvalues <- c(2, 3)
 for (dist in c("uni", "multi", "gamma")) {
     for (N in Nvalues) {
         if (dist == "uni") 
@@ -37,7 +37,7 @@ for (dist in c("uni", "multi", "gamma")) {
         }
         thisDF <- data.frame(N = rep(N, 3), dist = rep(dist, 3), blocking = c("scalar", "blockNoAdapt", "blockAdapt"), timePer10kN = timePer10kN)
         dfcomputationalRequirement <- rbind(dfcomputationalRequirement, thisDF)
-        save(dfcomputationalRequirement, file = "~/GitHub/automated-blocking-examples/results/results_computationalRequirement.RData")
+        save(dfcomputationalRequirement, file = file.path("results", "results_computationalRequirement.RData"))
         cat("\n")
         print(dfcomputationalRequirement)
     }

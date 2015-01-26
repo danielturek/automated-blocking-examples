@@ -1,8 +1,8 @@
 library(nimble)
 library(coda)
-source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
-kValues <- 0:2
-Nvalues <- c(2, 4, 8)
+source("autoBlock_utils.R")
+kValues <- 0:1
+Nvalues <- c(2, 4)
 niter <- 2e+05
 keepInd <- (niter/2 + 1):niter
 dfsamplingEfficiency <- data.frame()
@@ -32,12 +32,9 @@ for (expDecay in c(FALSE, TRUE)) {
             ess <- apply(samples, 2, effectiveSize)
             meanESS <- mean(ess)
             essPerN <- meanESS/length(keepInd)
-            samples <- NULL
-            Cmcmcs <- NA
-            gc()
             thisDF <- data.frame(expDecay = expDecay, k = k, rho = rho, N = N, timePer10kN = timePer10kN, essPerN = essPerN)
             dfsamplingEfficiency <- rbind(dfsamplingEfficiency, thisDF)
-            save(dfsamplingEfficiency, file = "~/GitHub/automated-blocking-examples/results/results_samplingEfficiency.RData")
+            save(dfsamplingEfficiency, file = file.path("results", "results_samplingEfficiency.RData"))
         }
     }
 }

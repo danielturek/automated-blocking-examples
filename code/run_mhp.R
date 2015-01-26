@@ -1,5 +1,5 @@
-source("~/GitHub/automated-blocking-examples/autoBlock_utils.R")
-load("~/GitHub/automated-blocking-examples/modelfiles/model_mhp.RData")
+source("autoBlock_utils.R")
+load(file.path("data", "model_mhp.RData"))
 niter <- 2e+05
 control <- list(niter = niter)
 ab <- autoBlock(code = code, constants = constants, data = data, inits = inits, control = control)
@@ -8,5 +8,5 @@ abList <- list(ab)
 names(abList) <- "mhp"
 dfmhp <- createDFfromABlist(abList, niter)
 dfmhp_summary <- printMinTimeABS(dfmhp, round = FALSE)
-save(dfmhp, dfmhp_summary, file = "~/GitHub/automated-blocking-examples/results/results_mhp.RData")
+save(dfmhp, dfmhp_summary, file = file.path("results", "results_mhp.RData"))
 
