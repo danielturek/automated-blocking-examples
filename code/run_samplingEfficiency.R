@@ -1,8 +1,8 @@
 library(nimble)
 library(coda)
-source("autoBlock_utils.R")
-kValues <- 0:1
-Nvalues <- c(2, 4)
+source("autoBlock.R")
+kValues <- 0:3
+Nvalues <- c(2, 4, 8, 16)
 niter <- 2e+05
 keepInd <- (niter/2 + 1):niter
 dfsamplingEfficiency <- data.frame()

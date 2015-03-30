@@ -1,5 +1,45 @@
 
 
+
+autoBlock <- function(code, constants=list(), data=list(), inits=list(),
+                      niter = 10000,
+                      run = list('all', 'default'),
+                      setSeed0 = TRUE,
+                      verbose = FALSE,
+                      round = TRUE ) {
+    ab <- autoBlockClass(code, constants, data, inits,
+                         control = list(niter=niter, setSeed0=setSeed0, verbose=verbose))
+    if(!'auto' %in% run) run <- c(run, 'auto')  ## always use 'autoBlock' routine
+    ab$run(run)
+    lastAutoInd <- max(grep('^auto', ab$naming))   ## index of final 'auto' iteration
+    lastAutoGrouping <- ab$grouping[[lastAutoInd]]  ## grouping of final 'auto' iteration
+    nonTrivialGroups <- lastAutoGrouping[unlist(lapply(lastAutoGrouping, function(x) length(x)>1))]
+    abList <- list(ab)
+    names(abList)[1] <- 'model'
+    df <- createDFfromABlist(abList, niter)
+    dfmin <- reduceDF(df, round = round)
+    cat('\nAuto-Blocking summary:\n')
+    print(dfmin)
+    if(length(nonTrivialGroups) > 0) {
+        cat('\nAuto-Blocking converged on the node groupings:\n')
+        for(i in seq_along(nonTrivialGroups)) {
+            group <- nonTrivialGroups[[i]]
+            cat(paste0('[', i, '] '))
+            cat(paste0(group, collapse = ', '))
+            cat('\n')
+        }
+    } else cat('\nAuto-Blocking converged on all scalar (univariate) sampling\n')
+    cat('\n')
+    ## create a new Rmodel and spec with the autoBlock groupings:
+    Rmodel <- nimbleModel(code=code, constants=constants, data=data, inits=inits)
+    spec <- configureMCMC(Rmodel, nodes = NULL)
+    for(nodeGroup in lastAutoGrouping) addSamplerToSpec(Rmodel, spec, nodeGroup)
+    retList <- list(summary=dfmin, autoGroups=nonTrivialGroups, Rmodel=Rmodel, spec=spec)
+    return(invisible(retList))
+}
+
+
+
 autoBlockModel <- setRefClass(
     Class = 'autoBlockModel',
     fields = list(
@@ -9,10 +49,12 @@ autoBlockModel <- setRefClass(
         inits = 'list',
         md = 'ANY',
         Rmodel = 'ANY',
+        Cmodel = 'ANY',
         scalarNodeVector = 'character',
         nodeGroupScalars = 'list',
         nodeGroupAllBlocked = 'list',
-        monitorsVector = 'character'
+        monitorsVector = 'character',
+        initialMCMCspec = 'ANY'
         ),
     methods = list(
         initialize = function(code, constants, data, inits) {
@@ -29,6 +71,31 @@ autoBlockModel <- setRefClass(
             stochNodeVector <- Rmodel$getNodeNames(stochOnly=TRUE, includeData=FALSE, returnScalarComponents=FALSE)
             monitorsVector <<- Rmodel$getNodeNames(stochOnly=TRUE, includeData=FALSE)
         },
+        ## here is where the initial MCMC spec is created, for re-use -- for new version
+        createInitialMCMCspec = function(runList) {
+            initialMCMCspec <<- configureMCMC(Rmodel)
+            nInitialSamplers <- length(initialMCMCspec$samplerSpecs)
+            initialMCMCspec$addSampler('RW',       control = list(targetNode  = scalarNodeVector[1]), print=FALSE)  ## add one RW sampler
+            initialMCMCspec$addSampler('RW_block', control = list(targetNodes = scalarNodeVector[1]), print=FALSE)  ## add one RW_block sampler
+            addCustomizedSamplersToInitialMCMCspec(runList)
+            initialMCMCspec$addMonitors(monitorsVector, print=FALSE)
+            RinitialMCMC <- buildMCMC(initialMCMCspec)
+            Cmodel <<- compileNimble(Rmodel)
+            CinitialMCMC <- compileNimble(RinitialMCMC, project = Rmodel)   ## (new version) yes, we need this compileNimble call -- this is the whole point!
+            initialMCMCspec$setSamplers(1:nInitialSamplers, print=FALSE)  ## important for new version: removes all news samplers added to initial MCMC spec
+        },
+        addCustomizedSamplersToInitialMCMCspec = function(runListCode) {
+            if(is.list(runListCode)) { lapply(runListCode, function(el) addCustomizedSamplersToInitialMCMCspec(el)); return() }
+            if(is.call(runListCode)) {
+                if(is.call(runListCode[[1]]) && length(runListCode[[1]])==3 && runListCode[[1]][[3]]=='addSampler') {
+                    runListCode[[1]][[2]] <- as.name('initialMCMCspec')
+                    eval(substitute(RUNLISTCODE, list(RUNLISTCODE=runListCode)))
+                    return()
+                }
+                lapply(runListCode, function(el) addCustomizedSamplersToInitialMCMCspec(el))
+                return()
+            }
+        },
         createGroups = function(listOfBlocks = list()) {
             listOfBlocks <- lapply(listOfBlocks, function(blk) Rmodel$expandNodeNames(blk, returnScalarComponents=TRUE))
             nodes <- scalarNodeVector
@@ -41,55 +108,13 @@ autoBlockModel <- setRefClass(
             newRmodel <- md$newModel(data=data, inits=inits)
             return(newRmodel)
         }
-        )
     )
+)
 
-createCodeAndConstants <- function(N, listOfBlockIndexes=list(), rhoVector=numeric(), expDecay=FALSE, gammaScalars=FALSE) {
-    code <- quote({})
-    constants <- list()
-    if(length(listOfBlockIndexes) != length(rhoVector)) stop()
-    for(i in seq_along(listOfBlockIndexes)) {
-        blockIndexes <- listOfBlockIndexes[[i]]
-        rho <- rhoVector[i]
-        numNodes <- as.numeric(length(blockIndexes))
-        if(numNodes == 1) {
-            code[[length(code)+1]] <-
-                if(gammaScalars) substitute(x[IND] ~ dgamma(1.1, 1.1), list(IND=as.numeric(blockIndexes)))
-                else             substitute(x[IND] ~ dnorm(0, 1),      list(IND=as.numeric(blockIndexes)))
-        } else {
-            muText <- paste0('mu', i)
-            sigmaText <- paste0('Sigma', i)
-            indMin <- as.numeric(min(blockIndexes))
-            indMax <- as.numeric(max(blockIndexes))
-            code[[length(code)+1]] <- substitute(x[MIN:MAX] ~ dmnorm(MU[1:NUM], cov = SIGMA[1:NUM,1:NUM]), list(MIN=indMin, MAX=indMax, NUM=numNodes, MU=as.name(muText), SIGMA=as.name(sigmaText)))
-            constants[[muText]] <- rep(0, numNodes)
-            constants[[sigmaText]] <- createCov(N=numNodes, rho=rho, expDecay=expDecay)
-        }
-    }
-    allInd <- 1:N
-    leftoverInd <- setdiff(allInd, unlist(listOfBlockIndexes))
-    for(ind in leftoverInd) {
-        code[[length(code)+1]] <-
-            if(gammaScalars) substitute(x[IND] ~ dgamma(1.1, 1.1), list(IND=as.numeric(ind)))
-            else             substitute(x[IND] ~ dnorm(0, 1),      list(IND=as.numeric(ind)))
-    }
-    codeAndConstantsList <- list(code=code, constants=constants)
-    return(codeAndConstantsList)
-}
-
-createCov <- function(N, indList=list(1:N), rho=0.8, indList2=list(), rho2=0.3, indList3=list(), rho3=0.5, expDecay=FALSE) {
-    Sigma <- diag(N)
-    for(gp in indList)  { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho^ abs(i1-i2) else rho  }
-    for(gp in indList2) { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho2^abs(i1-i2) else rho2 }
-    for(gp in indList3) { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho2^abs(i1-i2) else rho3 }
-    diag(Sigma) <- 1
-    Sigma
-}
 
 
 autoBlockParamDefaults <- function() {
     list(
-        adaptIntervalBlock = 200,
         cutree_heights = seq(0, 1, by=0.1),
         makePlots = FALSE,
         niter = 200000,
@@ -100,9 +125,9 @@ autoBlockParamDefaults <- function() {
 }
 
 
-autoBlock <- setRefClass(
+autoBlockClass <- setRefClass(
 
-    Class = 'autoBlock',
+    Class = 'autoBlockClass',
 
     fields = list(
         
@@ -111,7 +136,6 @@ autoBlock <- setRefClass(
         it = 'numeric',
 
         ## overall control
-        adaptIntervalBlock = 'numeric',
         cutree_heights = 'numeric',
         makePlots = 'logical',
         niter = 'numeric',
@@ -156,6 +180,8 @@ autoBlock <- setRefClass(
         run = function(runList) {
             if(!is.list(runList)) stop('runList argument should be a list')
             if(is.null(names(runList))) names(runList) <- rep('', length(runList))
+
+            abModel$createInitialMCMCspec(runList)  ## here is where the initial MCMC spec is created, for re-use -- for new version
             
             for(i in seq_along(runList)) {
                 runListElement <- runList[[i]]
@@ -167,32 +193,33 @@ autoBlock <- setRefClass(
                 } else if(class(runListElement) == '{') {
                     type <- 'spec'
                 } else stop('don\'t understand element in run list')
-                Rmodel <- abModel$newModel()
+                ##Rmodel <- abModel$newModel() ## original version
                 switch(type,
                        
-                       none =    { specList <- list(createSpecFromGroups(Rmodel, abModel$nodeGroupScalars))
-                                   runSpecListAndSaveBest(Rmodel, specList, 'none') },
+                       none =    { specList <- list(createSpecFromGroups(abModel$nodeGroupScalars))
+                                   runSpecListAndSaveBest(specList, 'none') },
 
-                       all =     { specList <- list(createSpecFromGroups(Rmodel, abModel$nodeGroupAllBlocked))
-                                   runSpecListAndSaveBest(Rmodel, specList, 'all') },
+                       all =     { specList <- list(createSpecFromGroups(abModel$nodeGroupAllBlocked))
+                                   runSpecListAndSaveBest(specList, 'all') },
 
-                       default = { specList <- list(configureMCMC(Rmodel))
-                                   runSpecListAndSaveBest(Rmodel, specList, 'default') },
+                       default = { specList <- list(configureMCMC(oldSpec = abModel$initialMCMCspec))
+                                   runSpecListAndSaveBest(specList, 'default') },
 
-                       blocks =  { specList <- list(createSpecFromGroups(Rmodel, abModel$createGroups(runListElement)))
+                       blocks =  { specList <- list(createSpecFromGroups(abModel$createGroups(runListElement)))
                                    name <- if(runListName == '') 'customBlocks' else runListName
-                                   runSpecListAndSaveBest(Rmodel, specList, name) },
+                                   runSpecListAndSaveBest(specList, name) },
 
-                       spec =    { specList <- list(eval(runListElement, envir=environment()))
+                       spec =    { Rmodel <- abModel$Rmodel  ## just hoping that the customSpec will find this
+                                   specList <- list(eval(runListElement, envir=environment()))
                                    name <- if(runListName == '') 'customSpec' else runListName
-                                   runSpecListAndSaveBest(Rmodel, specList, name) },
+                                   runSpecListAndSaveBest(specList, name) },
 
                        auto =    { autoIt <- 0
                                    while((autoIt < 2) || ((!groupingsEquiv(grouping[[it]], grouping[[it-1]])) && (min(essPT[[it]]) > min(essPT[[it-1]])))) {
-                                       Rmodel <- abModel$newModel()
+                                       ##Rmodel <- abModel$newModel() ## original version
                                        candidateGroupsList <- if(autoIt==0) list(abModel$nodeGroupScalars)  else determineCandidateGroupsFromCurrentSample()
-                                       specList <- lapply(candidateGroupsList, function(groups) createSpecFromGroups(Rmodel, groups))
-                                       runSpecListAndSaveBest(Rmodel, specList, paste0('auto',autoIt), auto=TRUE)
+                                       specList <- lapply(candidateGroupsList, function(groups) createSpecFromGroups(groups))
+                                       runSpecListAndSaveBest(specList, paste0('auto',autoIt), auto=TRUE)
                                        autoIt <- autoIt + 1
                                    }
                                },
@@ -226,17 +253,20 @@ autoBlock <- setRefClass(
             return(lapply(unique(ct), function(x) names(ct)[ct==x]))
         },
         
-        runSpecListAndSaveBest = function(Rmodel, specList, name, auto=FALSE) {
+        runSpecListAndSaveBest = function(specList, name, auto=FALSE) {
             RmcmcList <- timingList <- samplesList <- meansList <- sdsList <- essList <- essPTList <- essPTminList <- list()
             for(i in seq_along(specList)) {
                 checkOverMCMCspec(specList[[i]])
-                specList[[i]]$addMonitors(abModel$monitorsVector, print=FALSE)
+                ##specList[[i]]$addMonitors(abModel$monitorsVector, print=FALSE) ## original version
                 RmcmcList[[i]] <- buildMCMC(specList[[i]])
             }
-            toCompileList <- c(list(Rmodel), RmcmcList)
-            compiledList <- compileNimble(toCompileList)
-            Cmodel <- compiledList[[1]]
-            CmcmcList <- compiledList[-1]
+            ##toCompileList <- c(list(Rmodel), RmcmcList) ## original version
+            ##compiledList <- compileNimble(toCompileList)
+            ##Cmodel <- compiledList[[1]]
+            ##CmcmcList <- compiledList[-1]
+            Cmodel <- abModel$Cmodel
+            CmcmcList <- compileNimble(RmcmcList, project = abModel$Rmodel)
+            if(!is.list(CmcmcList)) CmcmcList <- list(CmcmcList)  ## make sure compileNimble() returns a list...
             for(i in seq_along(CmcmcList)) {
                 Cmodel$setInits(abModel$inits)
                 if(setSeed0) set.seed(0)
@@ -328,46 +358,30 @@ autoBlock <- setRefClass(
             return(samplerVector)
         },
         
-        createSpecFromGroups = function(Rmodel, groups) {
-            spec <- configureMCMC(Rmodel, nodes=NULL, monitors=character(0))
-            for(nodeGroup in groups) addSamplerToSpec(Rmodel, spec, nodeGroup)
+        createSpecFromGroups = function(groups) {
+            ##spec <- configureMCMC(Rmodel, nodes=NULL, monitors=character(0)) ## original version
+            spec <- configureMCMC(oldSpec = abModel$initialMCMCspec)  ## new version
+            spec$setSamplers()  ## new version -- removes all the samplers from initalMCMCspec
+            for(nodeGroup in groups) addSamplerToSpec(abModel$Rmodel, spec, nodeGroup)
             return(spec)
         },
         
-        addSamplerToSpec = function(Rmodel, spec, nodeGroup) {
-            if(length(nodeGroup) > 1) {
-                spec$addSampler(type = 'RW_block', control = list(targetNodes=nodeGroup, adaptInterval=adaptIntervalBlock), print = FALSE); return()
-            }
-            if(!(nodeGroup %in% Rmodel$getNodeNames())) {
-                spec$addSampler(type = 'RW', control = list(targetNode=nodeGroup), print = FALSE); return()
-            }
-            if(nodeGroup %in% Rmodel$getMaps('nodeNamesEnd')) {
-                cat(paste0('warning: using \'end\' sampler for node ', nodeGroup, ' may lead to results we don\'t want\n\n'))
-                spec$addSampler(type = 'end', control = list(targetNode=nodeGroup), print = FALSE); return()
-            }
-            ## conjugacyResult <- Rmodel$checkConjugacy(nodeGroup)
-            ## if((!is.null(conjugacyResult)) && conjOveride) {
-            ##     spec$addSampler(type = conjugacyResult$samplerType, control = conjugacyResult$control, print = FALSE); return()
-            ## }
-            if(Rmodel$getNodeInfo()[[nodeGroup]]$isDiscrete()) {
-                spec$addSampler(type = 'slice', control = list(targetNode=nodeGroup), print = FALSE); return()
-            }
-            if(length(Rmodel$expandNodeNames(nodeGroup, returnScalarComponents = TRUE)) > 1) {
-                spec$addSampler(type = 'RW_block', control = list(targetNodes=nodeGroup, adaptInterval=adaptIntervalBlock), print = FALSE); return()
-            }
-            spec$addSampler(type = 'RW', control = list(targetNode=nodeGroup), print = FALSE); return()
-        },
-
         checkOverMCMCspec = function(spec) {
+            warn <- FALSE
             for(ss in spec$samplerSpecs) {
-                if(ss$type == 'end') {
-                    msg <- 'using \'end\' sampler may lead to results we don\'t want'
-                    cat(paste0('\nWARNING: ', msg, '\n\n')); warning(msg)
-                }
+                ## if(ss$type == 'end') {
+                ##     msg <- 'using \'end\' sampler may lead to results we don\'t want'
+                ##     cat(paste0('\nWARNING: ', msg, '\n\n')); warning(msg)
+                ## }
                 if(grepl('^conjugate_', ss$type) && nimble:::nimbleOptions$verifyConjugatePosterior) {
-                    msg <- 'conjugate sampler running slow due to checking the posterior'
-                    cat(paste0('\nWARNING: ', msg, '\n\n')); warning(msg)
+                    ##msg <- 'conjugate sampler running slow due to checking the posterior'
+                    ##cat(paste0('\nWARNING: ', msg, '\n\n')); warning(msg)
+                    warn <- TRUE
                 }
+            }
+            if(warn) {
+                msg <- 'Conjugate sampler functions in \'default\' spec are running slow due to verifying the posterior;\nThis behaviour can be changed using a NIMBLE package option.'
+                warning(msg, call. = FALSE)
             }
         },
 
@@ -410,8 +424,31 @@ autoBlock <- setRefClass(
             if(length(grouping2) == 0) return(TRUE) else return(FALSE)
         }
         )
-    )
+)
 
+addSamplerToSpec <- function(Rmodel, spec, nodeGroup) {
+    if(length(nodeGroup) > 1) {
+        spec$addSampler(type = 'RW_block', control = list(targetNodes=nodeGroup), print = FALSE); return()
+    }
+    if(!(nodeGroup %in% Rmodel$getNodeNames())) {
+        spec$addSampler(type = 'RW', control = list(targetNode=nodeGroup), print = FALSE); return()
+    }
+    if(nodeGroup %in% Rmodel$getMaps('nodeNamesEnd')) {
+        ##cat(paste0('warning: using \'end\' sampler for node ', nodeGroup, ' may lead to results we don\'t want\n\n'))
+        spec$addSampler(type = 'end', control = list(targetNode=nodeGroup), print = FALSE); return()
+    }
+    ## conjugacyResult <- Rmodel$checkConjugacy(nodeGroup)
+    ## if((!is.null(conjugacyResult)) && conjOveride) {
+    ##     spec$addSampler(type = conjugacyResult$samplerType, control = conjugacyResult$control, print = FALSE); return()
+    ## }
+    if(Rmodel$getNodeInfo()[[nodeGroup]]$isDiscrete()) {
+        spec$addSampler(type = 'slice', control = list(targetNode=nodeGroup), print = FALSE); return()
+    }
+    if(length(Rmodel$expandNodeNames(nodeGroup, returnScalarComponents = TRUE)) > 1) {
+        spec$addSampler(type = 'RW_block', control = list(targetNodes=nodeGroup), print = FALSE); return()
+    }
+    spec$addSampler(type = 'RW', control = list(targetNode=nodeGroup), print = FALSE); return()
+}
 
 createDFfromABlist <- function(lst, niter) {
     df <- data.frame(model=character(), blocking=character(), timing=numeric(), node=character(), groupSize = numeric(), groupID = numeric(), sampler = character(), mean=numeric(), sd=numeric(), ess=numeric(), essPT=numeric(), stringsAsFactors=FALSE)
@@ -535,6 +572,37 @@ printMinTimeABS <- function(df, round=TRUE, addAutoMax=TRUE, sortOutput=FALSE) {
 }
 
 
+reduceDF <- function(df, addAutoMax=TRUE, sortOutput=TRUE, round=TRUE) {
+    df = data.frame(mcmc=df$mcmc, node=df$node, S=df$essPer10k, C=df$timePer10k, Efficiency=df$Efficiency, stringsAsFactors=FALSE)
+    dfOut <- df[numeric(), ]
+    mcmcs <- unique(df$mcmc)
+    for(mcmc in mcmcs) {
+        dfBlk <- df[df$mcmc == mcmc, ]
+        ind <- which(dfBlk$Efficiency == min(dfBlk$Efficiency))[1]
+        dfOut[dim(dfOut)[1]+1, ] <- dfBlk[ind, ]
+    }
+    dfOut[dfOut$mcmc=='auto0', 'mcmc'] <- 'All Scalar'
+    dfOut[dfOut$mcmc=='all', 'mcmc'] <- 'All Blocked'
+    dfOut[dfOut$mcmc=='default', 'mcmc'] <- 'Default'
+    if(addAutoMax) {
+        autoBlockings <- dfOut$mcmc[grepl('^auto', dfOut$mcmc)]
+        autoLast <- autoBlockings[length(autoBlockings)]
+        ## replace autoLast with 'autoMax'
+        dfOut[dfOut$mcmc==autoLast, 'mcmc'] <- 'Auto-Blocking'
+        ## remove any remaining 'auto#' entries
+        dfOut <- dfOut[!dfOut$mcmc %in% autoBlockings,]
+    }
+    if(sortOutput) dfOut <- dfOut[sort(dfOut$Efficiency,index.return=TRUE)$ix, ]
+    dimnames(dfOut)[[1]] <- 1:(dim(dfOut)[1])
+    if(round) {
+        dfOut$S          <- round(dfOut$S, 2)
+        dfOut$C          <- round(dfOut$C, 2)
+        dfOut$Efficiency <- round(dfOut$Efficiency, 2)
+    }
+    return(dfOut)
+}
+
+
 codeToText <- function(code) {
     a <- deparse(code, width.cutoff=500L)
     a <- a[c(-1, -length(a))]
@@ -582,6 +650,50 @@ multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
   }
 }
 
+
+
+
+createCodeAndConstants <- function(N, listOfBlockIndexes=list(), rhoVector=numeric(), expDecay=FALSE, gammaScalars=FALSE) {
+    code <- quote({})
+    constants <- list()
+    if(length(listOfBlockIndexes) != length(rhoVector)) stop()
+    for(i in seq_along(listOfBlockIndexes)) {
+        blockIndexes <- listOfBlockIndexes[[i]]
+        rho <- rhoVector[i]
+        numNodes <- as.numeric(length(blockIndexes))
+        if(numNodes == 1) {
+            code[[length(code)+1]] <-
+                if(gammaScalars) substitute(x[IND] ~ dgamma(1.1, 1.1), list(IND=as.numeric(blockIndexes)))
+                else             substitute(x[IND] ~ dnorm(0, 1),      list(IND=as.numeric(blockIndexes)))
+        } else {
+            muText <- paste0('mu', i)
+            sigmaText <- paste0('Sigma', i)
+            indMin <- as.numeric(min(blockIndexes))
+            indMax <- as.numeric(max(blockIndexes))
+            code[[length(code)+1]] <- substitute(x[MIN:MAX] ~ dmnorm(MU[1:NUM], cov = SIGMA[1:NUM,1:NUM]), list(MIN=indMin, MAX=indMax, NUM=numNodes, MU=as.name(muText), SIGMA=as.name(sigmaText)))
+            constants[[muText]] <- rep(0, numNodes)
+            constants[[sigmaText]] <- createCov(N=numNodes, rho=rho, expDecay=expDecay)
+        }
+    }
+    allInd <- 1:N
+    leftoverInd <- setdiff(allInd, unlist(listOfBlockIndexes))
+    for(ind in leftoverInd) {
+        code[[length(code)+1]] <-
+            if(gammaScalars) substitute(x[IND] ~ dgamma(1.1, 1.1), list(IND=as.numeric(ind)))
+            else             substitute(x[IND] ~ dnorm(0, 1),      list(IND=as.numeric(ind)))
+    }
+    codeAndConstantsList <- list(code=code, constants=constants)
+    return(codeAndConstantsList)
+}
+
+createCov <- function(N, indList=list(1:N), rho=0.8, indList2=list(), rho2=0.3, indList3=list(), rho3=0.5, expDecay=FALSE) {
+    Sigma <- diag(N)
+    for(gp in indList)  { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho^ abs(i1-i2) else rho  }
+    for(gp in indList2) { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho2^abs(i1-i2) else rho2 }
+    for(gp in indList3) { for(i1 in gp) for(i2 in gp) Sigma[i1,i2] <- Sigma[i2,i1] <- if(expDecay) rho2^abs(i1-i2) else rho3 }
+    diag(Sigma) <- 1
+    Sigma
+}
 
 
 

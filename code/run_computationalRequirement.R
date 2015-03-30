@@ -1,5 +1,5 @@
 library(nimble)
-source("autoBlock_utils.R")
+source("autoBlock.R")
 niter <- 50000
 keepInd <- (niter/2 + 1):niter
 dfcomputationalRequirement <- data.frame()

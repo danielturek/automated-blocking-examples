@@ -1,12 +1,11 @@
 library(nimble)
-source("autoBlock_utils.R")
-k <- 3
+source("autoBlock.R")
+k <- 6
 N <- 2^k
-rhoVector <- c(0.2)
-niter <- 2e+05
-control <- list(niter = niter)
+rhoVector <- c(0.2, 0.5, 0.8)
+niter <- 50000
 runList <- list("all", "auto")
-abList <- list()
+dfVaryingBlksFixedCorr <- NULL
 for (rho in rhoVector) {
     blockLengths <- c(1, 2^(0:(k - 1)))
     indList <- list()
@@ -20,12 +19,11 @@ for (rho in rhoVector) {
     codeAndConstants <- createCodeAndConstants(N, indList, rep(rho, length(indList)))
     code <- codeAndConstants$code
     constants <- codeAndConstants$constants
-    ab <- autoBlock(code = code, constants = constants, data = data, inits = inits, control = control)
-    ab$run(runList)
-    abList[[paste0("varyingBlksFixedCorr", rho)]] <- ab
+    dfTEMP <- autoBlock(code = code, constants = constants, data = data, inits = inits, niter = niter, run = runList)$summary
+    dfTEMP <- cbind(data.frame(rho = rho), dfTEMP)
+    if (is.null(dfVaryingBlksFixedCorr)) 
+        dfVaryingBlksFixedCorr <- dfTEMP
+    else dfVaryingBlksFixedCorr <- rbind(dfVaryingBlksFixedCorr, dfTEMP)
 }
-dfVaryingBlksFixedCorr <- createDFfromABlist(abList, niter)
-dfVaryingBlksFixedCorr$rho <- as.numeric(gsub(".*Corr(.+)", "\\1", dfVaryingBlksFixedCorr$model))
-dfVaryingBlksFixedCorr_summary <- printMinTimeABS(dfVaryingBlksFixedCorr, round = FALSE)
-save(dfVaryingBlksFixedCorr, dfVaryingBlksFixedCorr_summary, file = file.path("results", "results_varyingBlksFixedCorr.RData"))
+save(dfVaryingBlksFixedCorr, file = file.path("results", "results_varyingBlksFixedCorr.RData"))
 
